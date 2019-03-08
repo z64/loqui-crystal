@@ -1,0 +1,9 @@
+name: loqui
+version: 0.1.0
+
+authors:
+  - Zac Nowicki <zachnowicki@gmail.com>
+
+crystal: 0.27.2
+
+license: MIT
