@@ -1,34 +1,8 @@
 require "./frames"
+require "./session"
 
 class Loqui::Client
-  class Session
-    getter sequence_number : Atomic(UInt32)
-    getter closed : Bool
-    getter encoding : String? = nil
-    getter compression_method : String? = nil
-
-    def initialize(@socket : IO)
-      @sequence_number = Atomic(UInt32).new(0_u32)
-      @closed = false
-    end
-
-    def next_sequence
-      @sequence_number.add(1_u32)
-    end
-
-    def send(frame)
-      frame.to_io(@socket)
-    end
-
-    def read
-      Frame.from_io(@socket)
-    end
-
-    def close
-      @socket.close
-      @closed = true
-    end
-  end
+  getter session
 
   def self.new(host, port, dns_timeout = nil, connect_timeout = nil)
     socket = TCPSocket.new(host, port, dns_timeout, connect_timeout)
@@ -43,16 +17,13 @@ class Loqui::Client
 
   # :nodoc:
   def initialize(@session : Session)
-    @response_channels = Hash(Int32, Channel(Frame::Response | Frame::Error)).new
+    @response_channels = Hash(UInt32, Channel(Frame::Response | Frame::Error)).new
     @flags = Frame::Flags::Uncompressed
     @send_pings = false
   end
 
   def run(encodings, compression_methods)
-    payload = "#{encodings}|#{compression_methods}"
-    hello_frame = Frame::Hello.new(Frame::Flags::Uncompressed, 1, payload.to_slice)
-    @session.send(hello_frame)
-
+    hello(encodings, compression_methods)
     hello_ack = @session.read
     raise "Expected HelloAck payload, got: #{hello_ack}" unless hello_ack.is_a?(Frame::HelloAck)
 
@@ -63,6 +34,12 @@ class Loqui::Client
     @flags = Frame::Flags::Compressed unless data[1].empty?
     @send_pings = true
 
+    spawn_ping_loop
+    spawn_read_loop
+  end
+
+  # :nodoc:
+  def spawn_ping_loop
     spawn do
       while true
         interval = @session.ping_interval || 1.second
@@ -75,12 +52,23 @@ class Loqui::Client
         end
       end
     end
+  end
 
-    while true
-      frame = @session.read
-      handle_frame(frame)
-      break if @session.closed
+  # :nodoc:
+  def spawn_read_loop
+    spawn do
+      while true
+        frame = @session.read
+        handle_frame(frame)
+        break if @session.closed
+      end
     end
+  end
+
+  def hello(encodings, compression_methods)
+    payload = "#{encodings}|#{compression_methods}"
+    hello_frame = Frame::Hello.new(Frame::Flags::Uncompressed, 1, payload.to_slice)
+    @session.send(hello_frame)
   end
 
   def request(data) : Frame::Response
@@ -103,8 +91,12 @@ class Loqui::Client
     @session.send(frame)
   end
 
+  def on_close(&block : Frame::GoAway ->)
+    @go_away_callback = block
+  end
+
   private def wait_response(seq)
-    channel = @channels[seq] = Channel(Frame::Response | Frame::Error).new
+    channel = @response_channels[seq] = Channel(Frame::Response | Frame::Error).new
     channel.receive
   end
 
@@ -112,7 +104,7 @@ class Loqui::Client
   def handle_frame(frame)
     case frame
     when Frame::Response, Frame::Error
-      @response_channels.delete(frame.seq).try do |channel|
+      @response_channels.delete(frame.sequence_number).try do |channel|
         channel.send(frame)
       end
     when Frame::Ping
@@ -120,7 +112,7 @@ class Loqui::Client
       pong_frame = Frame::Pong.new(@flags, seq)
       @session.send(pong_frame)
     when Frame::GoAway
-      # TODO: close callback
+      @go_away_callback.try &.call(frame)
       @session.close
     end
   end
