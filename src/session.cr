@@ -1,8 +1,8 @@
 class Loqui::Session
   getter sequence_number : Atomic(UInt32)
   getter closed : Bool
-  getter encoding : String? = nil
   getter compression_method : String? = nil
+  property encoding : String? = nil
 
   def initialize(@socket : IO)
     @sequence_number = Atomic(UInt32).new(0_u32)

@@ -1,8 +1,11 @@
 require "./frames"
 require "./session"
+require "./compressor"
+require "./codec"
 
 class Loqui::Client
   getter session
+  getter codecs
 
   def self.new(host, port, dns_timeout = nil, connect_timeout = nil)
     socket = TCPSocket.new(host, port, dns_timeout, connect_timeout)
@@ -20,6 +23,10 @@ class Loqui::Client
     @response_channels = Hash(UInt32, Channel(Frame::Response | Frame::Error)).new
     @flags = Frame::Flags::Uncompressed
     @send_pings = false
+
+    @compressors = Hash(String, Compressor).new(NoOpCompressor.new)
+    @compressors["zlib"] = ZlibCompressor.new
+    @codecs = Hash(String, Codec).new(NoOpCodec.new)
   end
 
   def run(encodings, compression_methods)
@@ -71,17 +78,26 @@ class Loqui::Client
     @session.send(hello_frame)
   end
 
-  def request(data) : Frame::Response
+  def request(data)
     seq = @session.next_sequence
-    frame = Frame::Request.new(@flags, seq, data.to_slice)
+    payload = selected_codec.encode(data)
+    payload = selected_compressor.compress(payload) # TODO: Set compressed flag accordingly
+    frame = Frame::Request.new(@flags, seq, payload)
     @session.send(frame)
+
     reply = wait_response(seq)
     raise "Request failed: #{reply}" if reply.is_a?(Frame::Error)
-    reply
+    reply_data = if reply.flags.compressed?
+                   selected_compressor.decompress(reply.payload)
+                 else
+                   reply.payload
+                 end
+    selected_codec.decode(reply_data)
   end
 
   def push(data)
-    frame = Frame::Push.new(@flags, data.to_slice)
+    payload = selected_codec.encode(data)
+    frame = Frame::Push.new(@flags, payload)
     @session.send(frame)
   end
 
@@ -98,6 +114,16 @@ class Loqui::Client
   private def wait_response(seq)
     channel = @response_channels[seq] = Channel(Frame::Response | Frame::Error).new
     channel.receive
+  end
+
+  private def selected_codec
+    codec = @session.encoding || ""
+    @codecs[codec]
+  end
+
+  private def selected_compressor
+    codec = @session.compression_method || ""
+    @compressors[codec]
   end
 
   # :nodoc:

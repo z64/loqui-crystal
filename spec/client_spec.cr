@@ -6,7 +6,21 @@ private def with_server
   client_socket = TCPSocket.new("localhost", 1337)
   server_socket = server.accept
   yield client_socket, server_socket
-  server.close unless server.closed?
+ensure
+  # NOTE: I have not idea why this is (TCPServer | Nil)
+  if server
+    server.close unless server.closed?
+  end
+end
+
+class StringCodec < Loqui::Codec
+  def decode(payload : Bytes) : String
+    String.new(payload)
+  end
+
+  def encode(data)
+    data.to_slice
+  end
 end
 
 describe Loqui::Client do
@@ -19,7 +33,10 @@ describe Loqui::Client do
   it "sends requests" do
     with_server do |client_socket, server_socket|
       session = Loqui::Session.new(client_socket)
+      session.encoding = "text"
+
       client = Loqui::Client.new(session)
+      client.codecs["text"] = StringCodec.new
       client.spawn_read_loop
 
       spawn do
@@ -36,9 +53,7 @@ describe Loqui::Client do
 
       2.times do |i|
         reply = client.request("hello server")
-        reply.should be_a Loqui::Frame::Response
-        reply.sequence_number.should eq i
-        reply.payload.should eq "hello client".to_slice
+        reply.should eq "hello client"
       end
 
       client.session.close
